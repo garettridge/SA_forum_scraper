@@ -1,0 +1,21 @@
+{
+  "manifest_version": 2,
+  "name": "Something Awful Archiver",
+  "version": "0.1",
+  "description": "One-click archival tool for SA threads.",
+  "permissions": [
+    "downloads",
+    "tabs",
+    "activeTab",
+    "storage",
+    "*://forums.somethingawful.com/*"
+  ],
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_title": "SA Archiver"
+  },
+  "background": {
+    "scripts": ["background.js"]
+  }
+}
+
