@@ -1,3 +1,27 @@
+<<<<<<< HEAD
+let currentTabId = null;
+let pageDataResolver = null;
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+function randomDelay(minMs, maxMs) {
+  return delay(minMs + Math.floor(Math.random() * (maxMs - minMs)));
+}
+function downloadFile(options) {
+  return new Promise(resolve => chrome.downloads.download(options, resolve));
+}
+function fetchBlob(url) {
+  return fetch(url).then(r => r.blob());
+}
+function waitForTabLoad(tabId) {
+  return new Promise(resolve => {
+    chrome.tabs.onUpdated.addListener(function listener(updatedTabId, changeInfo) {
+      if (updatedTabId === tabId && changeInfo.status === "complete") {
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+=======
 //--------------------------------------
 // CONFIG
 //--------------------------------------
@@ -129,10 +153,131 @@ async function downloadBlob(blob, folder, filename) {
       setTimeout(() => URL.revokeObjectURL(url), 200);
       if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
       else resolve(downloadId);
+>>>>>>> 6e7b0fa (Initial commit; Scraping generally works but tweet text isn't being awaited, and other issues with the two tweet code paths not filling in fields.)
     });
   });
 }
 
+<<<<<<< HEAD
+async function scrapeThread(startUrl) {
+  const threadIdMatch = startUrl.match(/threadid=(\d+)/);
+  if (!threadIdMatch) {
+    console.error("Invalid SA thread URL.");
+    return;
+  }
+
+  const threadId = threadIdMatch[1];
+  const maxPages = 5;
+  const threadDir = `SA_Thread_${threadId}`;
+  const baseUrl = `https://forums.somethingawful.com/showthread.php?threadid=${threadId}&pagenumber=`;
+
+  const [tab] = await new Promise(resolve =>
+    chrome.tabs.query({ active: true, currentWindow: true }, resolve)
+  );
+
+  currentTabId = tab.id;
+
+  for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+    const url = `${baseUrl}${pageNum}`;
+    console.log(`➡️ Navigating to page ${pageNum}: ${url}`);
+    chrome.tabs.update(currentTabId, { url });
+
+    await waitForTabLoad(currentTabId);
+
+    await new Promise((resolve, reject) => {
+      chrome.tabs.executeScript(currentTabId, {
+        file: "scraper.js",
+        runAt: "document_idle", // or "document_end"
+        allFrames: false
+      }, result => {
+        if (chrome.runtime.lastError) {
+          console.error("❌ Failed to inject scraper.js:", chrome.runtime.lastError);
+          reject(chrome.runtime.lastError);
+        } else {
+          console.log("📥 scraper.js injected");
+          resolve(result);
+        }
+      });
+    });
+
+    const pageData = await new Promise(resolve => {
+      pageDataResolver = resolve;
+    });
+
+    if (!pageData || pageData.length === 0) {
+      console.log(`✅ No posts found on page ${pageNum}, stopping.`);
+      break;
+    }
+
+    const htmlParts = pageData.map(post => post.html).join('\n');
+    const filename = `${threadDir}/page${String(pageNum).padStart(4, '0')}.html`;
+
+    const htmlBlob = new Blob([
+      `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Thread ${threadId} - Page ${pageNum}</title>
+  <style>
+    body { font-family: sans-serif; padding: 40px; max-width: 900px; margin: auto; }
+    .postbox { margin-bottom: 3em; border-bottom: 1px solid #ccc; padding-bottom: 1em; }
+    .meta { font-size: 0.9em; color: #666; margin-bottom: 5px; }
+    img { max-width: 100%; }
+  </style>
+</head>
+<body>
+${htmlParts}
+</body>
+</html>`.trim()
+    ], { type: "text/html" });
+
+    const htmlURL = URL.createObjectURL(htmlBlob);
+    await downloadFile({ url: htmlURL, filename, saveAs: false });
+    console.log(`💾 Saved HTML: ${filename}`);
+
+    for (const post of pageData) {
+      for (const img of post.images) {
+        try {
+          const imgBlob = await fetchBlob(img.url);
+          const blobUrl = URL.createObjectURL(imgBlob);
+          const imgFile = `${threadDir}/images/${img.filename}`;
+          await downloadFile({ url: blobUrl, filename: imgFile, saveAs: false });
+          console.log(`🖼 Saved image: ${imgFile}`);
+          await delay(250 + Math.random() * 300);
+        } catch (err) {
+          console.warn(`⚠️ Failed to download: ${img.url}`);
+        }
+      }
+    }
+
+    chrome.runtime.sendMessage({
+      action: 'status',
+      msg: `✅ Page ${pageNum} archived`
+    });
+
+    await randomDelay(5000, 10000);
+  }
+
+  console.log("🎉 Finished thread scraping.");
+  currentTabId = null;
+  pageDataResolver = null;
+}
+
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  console.log("[BG] Received message", msg, sender);
+  if (msg.action === "start-scrape") {
+    if (!msg.url) return;
+    console.log("[BG] Starting scrape…");
+    scrapeThread(msg.url);
+  }
+
+  if (msg.action === "page-data" && pageDataResolver) {
+    console.log(`[BG] Got page data (sender tab: ${sender.tab?.id})`);
+    pageDataResolver(msg.data);
+    pageDataResolver = null;
+  }
+});
+=======
 function log(msg) {
   console.log(`[SA Scraper] ${msg}`);
   chrome.runtime.sendMessage({ type: 'status', text: msg });
@@ -164,14 +309,12 @@ async function fetchTweetFromArchive(tweetUrl) {
   const arr = await resp.json();
   if (!Array.isArray(arr) || arr.length < 2) throw new Error("No archive snapshot found for tweet");
 
-  log(`Internet Archive retreival will be used for ${tweetUrl}`);
-
   const [header, snap] = arr;
   const [timestamp] = snap;
   const waybackUrl = `https://web.archive.org/web/${timestamp}id_/${tweetUrl}`;
 
   // Step 2: Fetch the archived tweet HTML
-  const wbResp = await fetchWithTimeout(waybackUrl, {}, 20000);
+  const wbResp = await fetchWithTimeout(waybackUrl, {}, 5000);
   const html = await wbResp.text();
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, "text/html");
@@ -196,7 +339,6 @@ async function fetchTweetFromArchive(tweetUrl) {
 
 // Cache keyed by tweet URL
 function cacheTweet(url, data) {
-  log(`Caching tweet ${url}`);
   if (tweetCache.size >= TWEET_CACHE_LIMIT) {
     // Remove oldest
     const oldestKey = tweetCache.keys().next().value;
@@ -209,27 +351,21 @@ async function tryFetchAndCache(fetchFn, tweetUrl) {
   try {
     const data = await fetchFn(tweetUrl);
     if (data) {
-      cacheTweet(tweetUrl, data);
+      tweetCache.set(tweetUrl, data);
       return data;
     }
   } catch (err) {
-    console.warn(`Failed ${fetchFn.name} for ${tweetUrl}: ${err.message}`);
+    console.warn(`Failed ${fetchFn} for ${tweetUrl}: ${err.message}`);
   }
   return null;
 }
 
 async function getTweetData(tweetUrl) {
-  if (tweetCache.has(tweetUrl)) {
-    log(`Cached tweet was able to be reused: ${tweetUrl}`);
-    return tweetCache.get(tweetUrl);
-  }
-  log(`Cache miss for: ${tweetUrl}`);
+  if (tweetCache.has(tweetUrl)) return tweetCache.get(tweetUrl);
 
   // Try archive.org first
   let data = await tryFetchAndCache(fetchTweetFromArchive, tweetUrl);
   if (data) return data;
-
-  log(`Cache and Internet Archive both failed; falling back to live twitter request for ${tweetUrl}`);
 
   // Fallback: live scrape tweet in controlled tab
   data = await tryFetchAndCache( url => scrapeInTab(url,'div[data-testid="tweetText"]', 'tweet-scraper.js'), tweetUrl);
@@ -242,36 +378,24 @@ async function getTweetData(tweetUrl) {
     mainHTML: `<a href="${tweetUrl}" target="_blank">${tweetUrl}</a>`,
     repliesHTML: []
   };
-  cacheTweet(tweetUrl, fallbackData);
+  tweetCache.set(tweetUrl, fallbackData);
   return fallbackData;
 }
 
-function generateLocalTweetBox( { authorName, authorHandle, authorUrl, quotedName, quotedHandle, quotedUrl, tweetTime, mainHTML, quoteHTML, replies = [] },
-  tweetUrl) {
-  const repliesHTML = replies.length
-    ? `<div class="tweet-replies">${replies.map(r => `<div class="tweet-reply">${r}</div>`).join('')}</div>`
-    : '';
-
-  const quoteBlock = quotedName ? `
-    <div class="tweet-quote">
-      <a href="${quotedUrl || '#'}" target="_blank" class="tweet-quote-author">${quotedName}</a><br>
-      <span class="tweet-handle">@${quotedHandle}</span>
-      <div>${quoteHTML}</div>
-    </div>` : '';
-
-  const formattedTime = tweetTime
-    ? new Date(tweetTime).toLocaleString('en-US', { hour: 'numeric', minute: 'numeric', hour12: true, month: 'short', day: 'numeric', year: 'numeric' }).replace(',', ' ·')
-    : 'Unknown time';
+function generateLocalTweetBox({ authorName, authorHandle, tweetTime, mainHTML, quoteHTML, replies, tweetUrl }) {
+  const repliesHTML = `<div class="tweet-replies">${replies?.map(r => `<div class="tweet-reply">${r}</div>`).join('')}</div>`;
+  const quoteBlock = `<div class="tweet-quote">${quoteHTML}</div>`
 
   return `
     <div class="local-tweet">
       <div class="tweet-header">
-        <a href="${authorUrl || '#'}" target="_blank" class="tweet-author">${authorName}</a><br>
-        <span class="tweet-handle">${authorHandle}</span>
+        <span class="tweet-author">${authorName} <span class="tweet-handle">@${authorHandle}</span></span>
+        <a href="${tweetUrl}" target="_blank" title="${tweetTime}">
+          <span class="tweet-time">${tweetTime || "Unknown time"}</span>
+        </a>
       </div>
       <div class="tweet-main">${mainHTML}</div>
       ${quoteBlock}
-      <div class="tweet-time"><a href="${tweetUrl}" target="_blank" title="${tweetTime}">${formattedTime}</a></div>
       ${repliesHTML}
     </div>
   `;
@@ -506,23 +630,20 @@ async function scrapeThread() {
       }
     });
 
-    log(`Beginning Tweet replacement.`);
-
     // Tweet replacement
     for (const target of [
-      ...doc.querySelectorAll('a[data-archive-later="tweet"]')
+      ...doc.querySelectorAll('a[data-archive-later="tweet"]'),
+      ...doc.querySelectorAll('blockquote.twitter-tweet')
     ]) {
       let tweetUrl = null;
       let replaceNode = target;
 
       if (target.matches('a[data-archive-later="tweet"]')) {
         tweetUrl = target.href;
-        log(`Replacing Tweet OP URL: ${tweetUrl}`);
       } else {
         const link = target.querySelector('a[href*="twitter.com/"][href*="/status/"]');
         if (!link) continue;
         tweetUrl = link.href;
-        log(`Replacing Tweet Reply URL: ${tweetUrl}`);
         replaceNode = target.parentElement; // Replace whole preview container
       }
       if (!tweetUrl || !/twitter\.com\/[^/]+\/status\/\d+/.test(tweetUrl)) {
@@ -530,9 +651,9 @@ async function scrapeThread() {
           continue;
       }
 
-      const tweetData = await getTweetData(tweetUrl);
+      const tweetData = await getTweetData(tweetUrl); // your cache+fetch
 
-      const tweetBoxHTML = generateLocalTweetBox(tweetData, tweetUrl);
+      const tweetBoxHTML = generateLocalTweetBox(tweetData);
 
       const wrapper = doc.createElement('div');
       wrapper.innerHTML = tweetBoxHTML;
@@ -550,21 +671,10 @@ async function scrapeThread() {
   <style>
     body { font-family: sans-serif; max-width: 85%; margin: auto; padding: 40px; line-height: 1.4; }
     .postbox { margin-left: 12px; border-bottom: 1px solid #888 }
-    .postbox .body {
-      font-family: "Roboto", sans-serif;
-      font-weight: 400;
-      font-size: 15px;
-      line-height: 20px;
-      color: rgb(204, 204, 204);
-      overflow-wrap: break-word;
-      padding: 10px 9px 26px 20px;
-      background-color: transparent;
-      text-rendering: optimizeLegibility;
-    }
-    .meta { font-size: 0.9em; color: #666; margin-bottom: 0.5em; padding-left: 20px; padding-right: 8px; box-sizing: border-box;}
+    .meta { font-size: 0.9em; color: #666; margin-bottom: 0.5em; }
     img { max-width: 100%; }
     .postbox .body {
-      padding: 12px 20px;
+      padding: 12px 6px;
       margin: 0;
     }
     /* --- Dark mode quote box & spoiler styling --- */
@@ -572,23 +682,18 @@ async function scrapeThread() {
       background-color: #090a0d;
       color: #AAA;
     }
-    a { color: rgb(101, 161, 238); }
     .bbc-block {
       border-radius: 10px;
       border: 1px solid #343434;
       background-color: #1b202b;
-      margin: 12px 22px; padding: 2px 18px;
+      margin: 12px 22px;
+      padding: 2px 18px;
       box-shadow: none;
     }
     .bbc-block h4, .bbc-block h5 { color: #999; }
     .bbc-block h5 { border-color: #343434; }
-    .bbc-block blockquote {
-      color: rgb(165, 183, 207);
-      padding: 0px;
-      margin: 8px 0px 18px 0px; !important;
-    }
-    .quoteInner { overflow-y: hidden; text-wrap: wrap; font-size: 13px; }
-    .quoteInner h4 { margin-top: 0; font-style: italic; }
+    .bbc-block blockquote { color: #A5B7CF; }
+    .quoteInner { overflow-y: hidden; text-wrap: wrap; }
     .bbc-spoiler:hover, .bbc-spoiler.reveal, .bbc-spoiler.stay {
       background-color: #1c212a;
       color: #CCC;
@@ -662,94 +767,54 @@ async function scrapeThread() {
     /* Local tweet embed */
     .local-tweet {
       font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      border: 1px solid #30363d;
+      border: 1px solid #e1e8ed;
       border-radius: 12px;
       padding: 12px 16px;
       margin: 12px 0;
-      background-color: #0d1117;
-      color: #c9d1d9;
-      max-width: 590px; /* 40px wider */
-      min-width: 300px;
+      background-color: #fff;
+      color: #0f1419;
+      max-width: 550px;
     }
 
     .local-tweet .tweet-header {
       display: flex;
-      flex-direction: column;
+      align-items: center;
       margin-bottom: 6px;
       font-size: 14px;
-      color: #8b949e;
-      gap: 2px;
+      color: #536471;
     }
 
     .local-tweet .tweet-author {
-      font-weight: 700;
-      color: #58a6ff;
-      text-decoration: none;
-    }
-    .local-tweet .tweet-author:hover {
-      text-decoration: underline;
+      font-weight: bold;
+      margin-right: 6px;
+      color: #0f1419;
     }
 
-    .local-tweet .tweet-handle {
-      color: #8b949e;
-      font-weight: 400;
+    .local-tweet .tweet-time {
+      margin-left: auto;
       font-size: 13px;
+      color: #536471;
     }
 
     .local-tweet .tweet-main {
       font-size: 15px;
       line-height: 1.4;
       white-space: pre-wrap;
-      margin-bottom: 12px;
-      color: #c9d1d9;
-    }
-
-    .local-tweet .tweet-quote {
-      margin: 12px 0;
-      padding-left: 12px;
-      background-color: #161b22;
-      border-radius: 8px;
-      font-size: 15px;
-      font-weight: 400;
-      color: #c9d1d9;
-    }
-
-    .local-tweet .tweet-quote-author {
-      font-weight: 700;
-      color: #58a6ff;
-      text-decoration: none;
-      margin-bottom: 2px;
-      display: inline-block;
-    }
-    .local-tweet .tweet-quote-author:hover {
-      text-decoration: underline;
-    }
-
-    .local-tweet .tweet-time {
-      font-size: 16px;
-      margin-top: 8px;
-      color: #8b949e;
-    }
-    .local-tweet .tweet-time a {
-      color: inherit;
-      text-decoration: none;
-    }
-    .local-tweet .tweet-time a:hover {
-      text-decoration: underline;
     }
 
     .local-tweet .tweet-replies {
-      border-top: 1px solid #30363d;
-      margin-top: 12px;
-      padding-top: 12px;
+      border-top: 1px solid #e1e8ed;
+      margin-top: 8px;
+      padding-top: 8px;
     }
 
     .local-tweet .tweet-reply {
       padding: 6px 0;
       font-size: 14px;
-      color: #c9d1d9;
-      border-bottom: 1px solid #21262d;
+      color: #0f1419;
+      border-bottom: 1px solid #f0f0f0;
     }
+
     .local-tweet .tweet-reply:last-child {
       border-bottom: none;
     }
@@ -832,4 +897,5 @@ chrome.webRequest.onBeforeRequest.addListener(
   ["blocking"]
 );
 
+>>>>>>> 6e7b0fa (Initial commit; Scraping generally works but tweet text isn't being awaited, and other issues with the two tweet code paths not filling in fields.)
 

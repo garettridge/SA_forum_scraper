@@ -1,4 +1,24 @@
 <!DOCTYPE html>
+<<<<<<< HEAD
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body {
+      font-family: sans-serif;
+      width: 300px;
+      padding: 10px;
+    }
+    input {
+      width: 100%;
+    }
+    button {
+      width: 100%;
+      margin-top: 10px;
+    }
+    #status {
+      font-size: 90%;
+=======
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -26,15 +46,22 @@
       cursor: pointer;
     }
     #progressContainer {
+>>>>>>> 6e7b0fa (Initial commit; Scraping generally works but tweet text isn't being awaited, and other issues with the two tweet code paths not filling in fields.)
       margin-top: 10px;
     }
   </style>
 </head>
 <body>
+<<<<<<< HEAD
+  <label for="start-url">Thread URL:</label>
+  <input type="text" id="start-url" placeholder="https://forums.somethingawful.com/showthread.php?threadid=123456">
+  <button id="start-scrape">Start Archiving</button>
+  <div id="status"></div>
+=======
   <h1>SA Thread Archiver</h1>
   <div>
     <label for="maxPagesInput">Max Pages:</label>
-    <input type="number" id="maxPagesInput" min="1" value="1" style="width:4em;">
+    <input type="number" id="maxPagesInput" min="1" value="5" style="width:4em;">
   </div>
   <button id="startButton">Start</button>
   <button id="pauseButton" disabled>Pause</button>
@@ -45,6 +72,7 @@
   <div id="progressContainer" style="display:none;">
     Progress: <span id="progressLabel">0 / 0</span>
   </div>
+>>>>>>> 6e7b0fa (Initial commit; Scraping generally works but tweet text isn't being awaited, and other issues with the two tweet code paths not filling in fields.)
 
   <script src="popup.js"></script>
 </body>
