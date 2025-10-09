@@ -20,6 +20,7 @@ let maxPages = null;
 const postIdToPage = {};
 const scrapeStateKey = 'sa_scraper_state';
 const tweetCache = new Map();
+const downloadedMedia = new Set();
 
 //--------------------------------------
 // HELPERS
@@ -341,12 +342,16 @@ async function fetchImagesWithPoolWithFallback(images, folder, concurrency = 4) 
 
   async function worker() {
     while (index < groupKeys.length && !isPaused) {
-      const currentGroup = groups[groupKeys[index++]];
-      await fetchMediaGroupWithFallback(currentGroup, folder);
+      const currentGroupKey = groupKeys[index++];
+      if (downloadedMedia.has(currentGroupKey)) {
+        log(`Skipping duplicate media: ${currentGroupKey}`);
+        continue;
+      }
+      await fetchMediaGroupWithFallback(groups[currentGroupKey], folder);
+      downloadedMedia.add(currentGroupKey);
       await delayRandom(image_delay_min, image_delay_range);
     }
   }
-
   const workers = [];
   for (let i = 0; i < concurrency; i++) workers.push(worker());
   await Promise.all(workers);
@@ -508,6 +513,8 @@ async function scrapeThread() {
 
     log(`Beginning Tweet replacement.`);
 
+    const allImages = [];
+
     // Tweet replacement
     for (const target of [
       ...doc.querySelectorAll('a[data-archive-later="tweet"]')
@@ -531,6 +538,18 @@ async function scrapeThread() {
       }
 
       const tweetData = await getTweetData(tweetUrl);
+
+      if( tweetData.error ) {
+        log(`Tweet parsing error: ${tweetData.error}`);
+        isPaused = true;
+        isRunning = false;
+        return;
+      }
+
+      if( Array.isArray( tweetData.authorMedia ))
+        allImages.push( ...tweetData.authorMedia );
+      if( Array.isArray( tweetData.quotedMedia ))
+        allImages.push( ...tweetData.quotedMedia );
 
       const tweetBoxHTML = generateLocalTweetBox(tweetData, tweetUrl);
 
@@ -793,7 +812,7 @@ document.addEventListener('DOMContentLoaded', function () {
     log(`💾 Saved HTML page${String(pageNum).padStart(4, '0')}.html`);
 
     // *** CORS-SAFE IMAGE DOWNLOAD IN BACKGROUND ***
-    const allImages = pageData.posts.flatMap(p => p.images || []);
+    allImages.push( ...pageData.posts.flatMap(p => p.images || []) );
     log(`[scrapeThread] Starting image downloads for ${allImages.length} images.`);
     await fetchImagesWithPoolWithFallback(allImages, threadDir, 4);
     log(`[scrapeThread] Image downloads complete for page ${pageNum}`);
