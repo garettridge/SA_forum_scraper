@@ -16,7 +16,8 @@ let pageDataResolver = null;
 let currentTabId = null;
 let totalPages = null;
 let finalPage = null;
-let maxPages = null;
+let startPage = 1;
+let maxPages = 1;
 const postIdToPage = {};
 const scrapeStateKey = 'sa_scraper_state';
 const tweetCache = new Map();
@@ -161,11 +162,11 @@ function storageLocal(action, keyOrObj) {
 async function fetchTweetFromArchive(tweetUrl) {
   // Step 1: Find the most recent capture timestamp via Wayback CDX API
   const cdxApi = `https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(tweetUrl)}&output=json&fl=timestamp,original&filter=statuscode:200&limit=1&collapse=digest`;
-  const resp = await fetchWithTimeout(cdxApi, {}, 5000);
+  const resp = await fetchWithTimeout(cdxApi, {}, 15000);
   const arr = await resp.json();
   if (!Array.isArray(arr) || arr.length < 2) throw new Error("No archive snapshot found for tweet");
 
-  log(`Internet Archive retreival will be used for ${tweetUrl}`);
+  log(`Internet Archive retrieval will be used for ${tweetUrl}`);
 
   const [header, snap] = arr;
   const [timestamp] = snap;
@@ -177,23 +178,53 @@ async function fetchTweetFromArchive(tweetUrl) {
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, "text/html");
 
-  // Step 3: Get tweet content
+  // Step 3: Extract permalink time and convert to ISO
+  let tweetTime = "";
+  const timeEl = doc.querySelector('.tweet-timestamp');
+  if (timeEl) {
+    const timeSpan = timeEl.querySelector('span._timestamp');
+    // Prefer numeric 'data-time' attribute to avoid locale issues
+    let numericTime = timeSpan?.getAttribute('data-time') || timeSpan?.getAttribute('data-time-ms');
+    if (numericTime) {
+      tweetTime = new Date(parseInt(numericTime, 10) * 1000).toISOString();
+    } else {
+      tweetTime = timeEl.getAttribute('title') || "";
+    }
+  }
+
+  // Step 4: Extract linkback (permalink URL) for the tweet
+  const linkEl = timeEl?.closest('a[href*="/status/"]') || doc.querySelector('.tweet-timestamp.js-permalink');
+  const linkback = linkEl ? new URL(linkEl.getAttribute('href'), 'https://web.archive.org').href : tweetUrl;
+
+  // Step 5: Extract author info
+  const authorName = doc.querySelector('.FullNameGroup .fullname')?.textContent.trim() || "";
+  const authorHandle = doc.querySelector('.username.u-dir b')?.textContent.trim() || "";
+  const authorAnchor = doc.querySelector('.permalink-header .account-group');
+  const authorUrl = authorAnchor ? new URL(authorAnchor.getAttribute('href'), 'https://twitter.com').href : "";
+
+  // Step 6: Extract main tweet HTML content
   const mainTweetEl = doc.querySelector('p.tweet-text, div.tweet-text');
   const mainHTML = mainTweetEl ? mainTweetEl.innerHTML : '';
 
-  const timeEl = doc.querySelector('.tweet-timestamp');
-  const tweetTime = timeEl?.getAttribute('title') || "";
-  const authorName = doc.querySelector('.FullNameGroup .fullname')?.textContent.trim() || "";
-  const authorHandle = doc.querySelector('.username.u-dir b')?.textContent.trim() || "";
+  // Step 7: Extract quoted tweet info
+  let quotedName = "", quotedHandle = "", quotedUrl = "", quoteHTML = "";
+  const quoteTweetEl = doc.querySelector('.QuoteTweet');
+  if (quoteTweetEl) {
+    quotedName = quoteTweetEl.querySelector('.fullname')?.textContent.trim() || '';
+    quotedHandle = quoteTweetEl.querySelector('.username b')?.textContent.trim() || '';
+    quotedUrl = quotedHandle ? `https://twitter.com/${quotedHandle}` : '';
+    quoteHTML = quoteTweetEl.querySelector('.QuoteTweet-text')?.innerHTML || '';
+  }
 
-  const quoteTweetEls = Array.from(doc.querySelectorAll('.QuoteTweet .QuoteTweet-text'));
-  const quoteHTML = quoteTweetEls.map(el => el.innerHTML).join('<hr>') || '';
+  // Step 8: Extract up to 5 replies' text
+  const replyEls = Array.from(doc.querySelectorAll('p.TweetTextSize.js-tweet-text.tweet-text')).slice(1, 6);
+  const replies = replyEls.length ? replyEls.map(el => el.innerHTML) : [];
 
-  const replyEls = Array.from(doc.querySelectorAll('p.TweetTextSize.js-tweet-text.tweet-text')).slice(0, 5);;
-  const repliesHTML = replyEls.length ? replyEls.map(el => el.innerHTML) : [];
+  // Skip images/video media because archive.org links directly to twitter's CDN for deleted tweets...
 
-  return { authorName, authorHandle, tweetTime, mainHTML, quoteHTML, repliesHTML, tweetUrl };
+  return { authorName, authorHandle, authorUrl, tweetTime, linkback, mainHTML, authorMedia:[], quotedName, quotedHandle, quotedUrl, quoteHTML, quotedMedia:[], replies, tweetUrl };
 }
+
 
 // Cache keyed by tweet URL
 function cacheTweet(url, data) {
@@ -222,42 +253,67 @@ async function tryFetchAndCache(fetchFn, tweetUrl) {
 async function getTweetData(tweetUrl) {
   if (tweetCache.has(tweetUrl)) {
     log(`Cached tweet was able to be reused: ${tweetUrl}`);
+    tweetCache.get(tweetUrl).wasCached = true;
     return tweetCache.get(tweetUrl);
   }
   log(`Cache miss for: ${tweetUrl}`);
 
-  // Try archive.org first
-  let data = await tryFetchAndCache(fetchTweetFromArchive, tweetUrl);
-  if (data) return data;
+  // Try live scrape in controlled tab first
+  let data = await tryFetchAndCache( url => scrapeInTab(url,'div[data-testid="tweetText"]', 'tweet-scraper.js'), tweetUrl);
+  if (data && !data.error )
+    return data;
 
-  log(`Cache and Internet Archive both failed; falling back to live twitter request for ${tweetUrl}`);
+  if( data?.error )
+    log(`Live tweet scraping error: ${data.error}`);
 
-  // Fallback: live scrape tweet in controlled tab
-  data = await tryFetchAndCache( url => scrapeInTab(url,'div[data-testid="tweetText"]', 'tweet-scraper.js'), tweetUrl);
-  if (data) return data;
+  log(`Cache and Live Tweet scrape both failed; falling back to Internet Archive for ${tweetUrl}`);
+
+  // Fallback: archive.org
+  data = await tryFetchAndCache(fetchTweetFromArchive, tweetUrl);
+  if (data && !data.error )
+    return data;
+  if( data?.error )
+    log(`Internet Archive tweet scraping error: ${data.error}`);
 
   // Return minimal fallback placeholder
   const fallbackData = {
     author: '',
     tweetTime: '',
     mainHTML: `<a href="${tweetUrl}" target="_blank">${tweetUrl}</a>`,
-    repliesHTML: []
+    replies: []
   };
   cacheTweet(tweetUrl, fallbackData);
   return fallbackData;
 }
 
-function generateLocalTweetBox( { authorName, authorHandle, authorUrl, quotedName, quotedHandle, quotedUrl, tweetTime, mainHTML, quoteHTML, replies = [] },
+function generateLocalTweetBox( { authorName, authorHandle, authorUrl, authorMedia=[], authorCards=[], quotedName, quotedHandle, quotedUrl, quotedMedia=[], quotedCards=[], tweetTime, mainHTML="", quoteHTML, replies=[] },
   tweetUrl) {
+  function generateMediaHtml(media) {
+    return `
+    <div class="tweet-media-container">
+      <img src="images/${media.filename}" alt="" class="tweet-media" />
+    </div>`;
+  }
+  function generateCardHtml(card) {
+    return `
+      <div class="tweet-card">
+        <a href="${card.url}" target="_blank" class="tweet-card-link">
+          ${card.image ? `<img src="images/${card.filename}" alt="" class="tweet-card-image">` : ''}
+          <div class="tweet-card-title">${card.title || ''}</div>
+          <div class="tweet-card-publisher">${card.publisher || ''}</div>
+        </a>
+      </div>`;
+  }
   const repliesHTML = replies.length
     ? `<div class="tweet-replies">${replies.map(r => `<div class="tweet-reply">${r}</div>`).join('')}</div>`
     : '';
 
   const quoteBlock = quotedName ? `
     <div class="tweet-quote">
-      <a href="${quotedUrl || '#'}" target="_blank" class="tweet-quote-author">${quotedName}</a><br>
-      <span class="tweet-handle">@${quotedHandle}</span>
+      <a href="${quotedUrl || '#'}" target="_blank" class="tweet-quote-author">${quotedName}</a> <span class="tweet-handle">${quotedHandle}</span>
       <div>${quoteHTML}</div>
+      ${quotedMedia.map(generateMediaHtml).join('')}
+      ${quotedCards.map(generateCardHtml).join('')}
     </div>` : '';
 
   const formattedTime = tweetTime
@@ -271,6 +327,8 @@ function generateLocalTweetBox( { authorName, authorHandle, authorUrl, quotedNam
         <span class="tweet-handle">${authorHandle}</span>
       </div>
       <div class="tweet-main">${mainHTML}</div>
+      ${authorMedia.map(generateMediaHtml).join('')}
+      ${authorCards.map(generateCardHtml).join('')}
       ${quoteBlock}
       <div class="tweet-time"><a href="${tweetUrl}" target="_blank" title="${tweetTime}">${formattedTime}</a></div>
       ${repliesHTML}
@@ -370,9 +428,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     pageDataResolver = null;
   }
   if (msg.command === 'start-scrape') {
-    if (msg.maxPages && !isNaN(msg.maxPages)) {
+    if (!isNaN(msg?.startPage))
+      startPage = msg.startPage;
+    if (!isNaN(msg?.maxPages))
       maxPages = msg.maxPages;
-    }
     if (isPaused) isPaused = false;
     log("[onMessage] Starting scrapeThread.");
     scrapeThread();
@@ -448,13 +507,13 @@ async function scrapeThread() {
   const resumePage = (resumeStateRaw || {})[key] || 0;
   log(`Loaded resume page: ${JSON.stringify(resumePage)}`);
 
-  let pageNum = 1;
+  let pageNum = startPage;
   if (resumePage > 0 && resumePage < totalPages) {
     pageNum = resumePage;
-    finalPage = Math.min( pageNum + maxPages, totalPages);
+    finalPage = Math.min( pageNum + maxPages - 1, totalPages);
     log(`🔄 Resuming thread ${threadId} from page ${pageNum}, will scrape ${maxPages} more pages, stopping at ${finalPage}`);
   } else {
-    finalPage = maxPages;
+    finalPage = pageNum + maxPages - 1;
     log(`Starting fresh scrape, will scrape ${maxPages} pages total.`);
   }
 
@@ -490,6 +549,13 @@ async function scrapeThread() {
       postIdToPage[post.postId] = pageNum;
     }
 
+    const firstPostTimestampISO = pageData.posts.length > 0
+      ? new Date(pageData.posts[0].timestamp).toISOString()
+      : null;
+    const dateMetaTag = firstPostTimestampISO
+      ? `<meta name="first-post-date" content="${firstPostTimestampISO}">`
+      : '';
+
     // Save HTML for the page
     const htmlParts = pageData.posts.map(p => p.html).join('\n');
     // Wrap in a DOMParser so we can safely find quote links:
@@ -513,7 +579,7 @@ async function scrapeThread() {
 
     log(`Beginning Tweet replacement.`);
 
-    const allImages = [];
+    let allImages = [];
 
     // Tweet replacement
     for (const target of [
@@ -546,17 +612,45 @@ async function scrapeThread() {
         return;
       }
 
-      if( Array.isArray( tweetData.authorMedia ))
-        allImages.push( ...tweetData.authorMedia );
-      if( Array.isArray( tweetData.quotedMedia ))
-        allImages.push( ...tweetData.quotedMedia );
+      if( ! tweetData.wasCached ) {
+        let newImages = [];
+
+        if( Array.isArray( tweetData.authorMedia ))
+          newImages.push( ...tweetData.authorMedia );
+        if( Array.isArray( tweetData.quotedMedia ))
+          newImages.push( ...tweetData.quotedMedia );
+        if( Array.isArray( tweetData.authorCards ))
+          newImages.push( ...tweetData.authorCards.map( c => { return { filename: c.filename, url: c.image };} ) );
+        if( Array.isArray( tweetData.quotedCards ))
+          newImages.push( ...tweetData.quotedCards.map( c => { return { filename: c.filename, url: c.image };} ) );
+
+        newImages = newImages.filter( i => i.filename && i.url );
+        newImages.forEach( i => log( tweetUrl + " has Tweet image: " + i.url ));
+        allImages.push(...newImages);
+      }
 
       const tweetBoxHTML = generateLocalTweetBox(tweetData, tweetUrl);
 
       const wrapper = doc.createElement('div');
-      wrapper.innerHTML = tweetBoxHTML;
-      replaceNode.replaceWith(...wrapper.childNodes);
+
+      const originalContainer = target.closest('div.tweet') || replaceNode; // Find the SA outer tweet container
+      const originalLink = `<a href="${tweetUrl}" target="_blank">${tweetUrl}</a><br>`;
+
+      wrapper.innerHTML = originalLink + tweetBoxHTML;
+
+      originalContainer.replaceWith(...wrapper.childNodes);
     }
+
+    const prevPage = pageNum > 1 ? `page${String(pageNum - 1).padStart(4, '0')}.html` : null;
+    const nextPage = pageNum < totalPages ? `page${String(pageNum + 1).padStart(4, '0')}.html` : null;
+
+    const pageNavHTML = `
+    <div style="text-align:center; margin:30px 0; font-size:18px;">
+      ${prevPage ? `<a href="${prevPage}" style="text-decoration:none; color:#58a6ff;">&lt;</a>` : `<span style="color:#555;">&lt;</span>`}
+      <span style="margin:0 12px;">Page ${pageNum}</span>
+      ${nextPage ? `<a href="${nextPage}" style="text-decoration:none; color:#58a6ff;">&gt;</a>` : `<span style="color:#555;">&gt;</span>`}
+    </div>
+    `;
 
     const htmlPartsFixed = doc.body.innerHTML;
 
@@ -566,6 +660,7 @@ async function scrapeThread() {
 <head>
   <meta charset="UTF-8" />
   <title>Thread ${threadId} — Page ${pageNum}</title>
+  ${dateMetaTag}
   <style>
     body { font-family: sans-serif; max-width: 85%; margin: auto; padding: 40px; line-height: 1.4; }
     .postbox { margin-left: 12px; border-bottom: 1px solid #888 }
@@ -690,7 +785,6 @@ async function scrapeThread() {
       max-width: 590px; /* 40px wider */
       min-width: 300px;
     }
-
     .local-tweet .tweet-header {
       display: flex;
       flex-direction: column;
@@ -699,7 +793,6 @@ async function scrapeThread() {
       color: #8b949e;
       gap: 2px;
     }
-
     .local-tweet .tweet-author {
       font-weight: 700;
       color: #58a6ff;
@@ -708,13 +801,11 @@ async function scrapeThread() {
     .local-tweet .tweet-author:hover {
       text-decoration: underline;
     }
-
     .local-tweet .tweet-handle {
       color: #8b949e;
       font-weight: 400;
       font-size: 13px;
     }
-
     .local-tweet .tweet-main {
       font-size: 15px;
       line-height: 1.4;
@@ -722,7 +813,6 @@ async function scrapeThread() {
       margin-bottom: 12px;
       color: #c9d1d9;
     }
-
     .local-tweet .tweet-quote {
       margin: 12px 0;
       padding-left: 12px;
@@ -732,7 +822,6 @@ async function scrapeThread() {
       font-weight: 400;
       color: #c9d1d9;
     }
-
     .local-tweet .tweet-quote-author {
       font-weight: 700;
       color: #58a6ff;
@@ -743,7 +832,6 @@ async function scrapeThread() {
     .local-tweet .tweet-quote-author:hover {
       text-decoration: underline;
     }
-
     .local-tweet .tweet-time {
       font-size: 16px;
       margin-top: 8px;
@@ -756,13 +844,11 @@ async function scrapeThread() {
     .local-tweet .tweet-time a:hover {
       text-decoration: underline;
     }
-
     .local-tweet .tweet-replies {
       border-top: 1px solid #30363d;
       margin-top: 12px;
       padding-top: 12px;
     }
-
     .local-tweet .tweet-reply {
       padding: 6px 0;
       font-size: 14px;
@@ -772,10 +858,23 @@ async function scrapeThread() {
     .local-tweet .tweet-reply:last-child {
       border-bottom: none;
     }
+    .tweet-media-container {
+      margin: 8px 0;
+      max-width: 520px; /* Matches quoted tweet width */
+    }
+    .tweet-media {
+      width: 100%;
+      height: auto;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+      display: block;
+    }
   </style>
 </head>
 <body>
+${pageNavHTML}
 ${htmlPartsFixed}
+${pageNavHTML}
 <script>
 document.addEventListener('DOMContentLoaded', function () {
   document.querySelectorAll('.timg_container .note').forEach(function(note) {
@@ -834,11 +933,11 @@ document.addEventListener('DOMContentLoaded', function () {
   isRunning = false;
 }
 
-// Remove/block images/media from the original network traffic, since we'll need a separate fetch to scrape each one anyway.
+// Remove/block somethingawful images/media from the original network traffic, since we'll need a separate fetch to scrape each one anyway.
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     // Only block if blocking is enabled and tabId matches
-    if (currentTabId !== null && details.tabId === currentTabId) {
+    if (currentTabId !== null && details.tabId === currentTabId && details.url.includes('forums.somethingawful.com')) {
       return { cancel: true };
     }
     // Otherwise do not block
@@ -850,5 +949,4 @@ chrome.webRequest.onBeforeRequest.addListener(
   },
   ["blocking"]
 );
-
 

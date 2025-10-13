@@ -27,7 +27,7 @@ function parseAuthorInfo(innerText) {
 
 function findTweetContainer(innerDiv) {
     let container = innerDiv?.parentElement;
-    while (container && !container.querySelector('div[data-testid="User-Name"]')) {
+    while (container && !container.querySelector('time')) {
       container = container.parentElement;
     }
   return container;
@@ -54,15 +54,68 @@ function extract_media( container, tweetId ) {
   return mediaUrls;
 }
 
+function extract_card_previews(container, tweetId, { timeout = 6000, interval = 400 } = {}) {
+  // First quick check for spinner or card wrapper
+  const spinner = container.querySelector('div[role="progressbar"]');
+  const initialCard = container.querySelector('div[data-testid="card.wrapper"]');
+
+  if (!spinner && !initialCard) {
+    // No sign of card loading or card present, skip polling
+    return [];
+  }
+  return new Promise((resolve) => {
+    const start = Date.now();
+
+    function check() {
+      const cardEls = container.querySelectorAll('div[data-testid="card.wrapper"]');
+
+      if (cardEls.length > 0 || Date.now() - start > timeout) {
+        const cards = Array.from(cardEls).map((card, i) => {
+          const cardLink = card.querySelector('a[role="link"]')?.href || '';
+          const cardTitle = card.querySelector('span, .css-1jxf684')?.textContent || '';
+          const publisher = card.querySelector('[style*="color: rgb(113, 118, 123)"]')?.textContent || '';
+
+          // Image from <img> or background-image style div
+          let imgEl = card.querySelector('img');
+          let imgUrl = imgEl ? imgEl.src : null;
+          if (!imgUrl) {
+            const bgDiv = card.querySelector('div[style*="background-image"]');
+            if (bgDiv) {
+              const match = bgDiv.style.backgroundImage.match(/url\("(.*?)"\)/);
+              if (match) imgUrl = match[1];
+            }
+          }
+
+          return {
+            url: cardLink,
+            image: imgUrl,
+            title: cardTitle,
+            publisher,
+            filename: imgUrl ? `${tweetId}_card${i}.jpg` : null,
+          };
+        });
+        resolve(cards);
+      } else {
+        setTimeout(check, interval);
+      }
+    }
+    check();
+  });
+}
+
 (async () => {
   try {
     let mainHTML = '', quoteHTML = '', authorMedia, quotedMedia;
-    const tweetTextEls = await waitForSelector(document, 'div[data-testid="tweetText"]', {all: true});
-    if (tweetTextEls.length > 0) mainHTML = tweetTextEls[0].innerHTML;
-    if (tweetTextEls.length > 1) quoteHTML = tweetTextEls[1].innerHTML;
+    let preEmbeddedLinks_Quote = [];
+    const usernames = await waitForSelector(document, 'div[data-testid="User-Name"]', {all: true});
+    const mainTweet = findTweetContainer(usernames[0]);
+    const quotedTweet = findTweetContainer(usernames[1]);
 
-    const mainTweet = findTweetContainer(tweetTextEls[0]);
-    const quotedTweet = findTweetContainer(tweetTextEls[1]);
+    const tweetTextEls = document.querySelectorAll('div[data-testid="tweetText"]');
+    mainHTML = tweetTextEls[0]?.innerHTML;
+    const preEmbeddedLinks_Main = tweetTextEls[0]?.querySelectorAll('a[data-pre-embedded="true"]');
+    quoteHTML = tweetTextEls[1]?.innerHTML;
+    preEmbeddedLinks_Quote = tweetTextEls[1]?.querySelectorAll('a[data-pre-embedded="true"]');
 
     const timeEls = Array.from( await waitForSelector(mainTweet, 'time', {all: true}) );
     const timeEl = timeEls.find( e => e.parentElement?.tagName.toLowerCase() === 'a' );  // Main tweet's time, not quote tweet's
@@ -71,10 +124,9 @@ function extract_media( container, tweetId ) {
     const tweetUrl = href.startsWith('/') ? `https://twitter.com${href}` : href;
     const tweetId = tweetUrl.match(/status\/(\d+)/)?.[1] || 'unknown';
 
-    const usernames = await waitForSelector(document, 'div[data-testid="User-Name"]', {all: true});
     const authorInfo = parseAuthorInfo(usernames[0].innerText);
     let quotedData = null;
-    if (tweetTextEls.length > 1) {
+    if (usernames.length > 1) {
       quotedData = parseAuthorInfo(usernames[1].innerText);
     }
     const quotedName = quotedData?.name || '';
@@ -83,7 +135,7 @@ function extract_media( container, tweetId ) {
 
     if( quotedTweet ) {
       const mediaPlaceholder = quotedTweet.querySelector('a[href*="/photo/"], a[href*="/video/"]');
-      if( mediaPlaceholder ) {
+      if( mediaPlaceholder || preEmbeddedLinks_Quote?.length ) {
         const img = await waitForSelector( quotedTweet, 'img', {timeout: 4000});
         if (img?.src)
           quotedMedia = extract_media ( quotedTweet, tweetId );
@@ -91,17 +143,19 @@ function extract_media( container, tweetId ) {
       quotedTweet.remove();
     }
     const mediaPlaceholder = mainTweet.querySelector('a[href*="/photo/"], a[href*="/video/"]');
-    if( mediaPlaceholder ) {
-      const img = await waitForSelector( mainTweet, 'img', {timeout: 4000});
+    if( mediaPlaceholder || preEmbeddedLinks_Main?.length ) {
+      const img = await waitForSelector( mainTweet, 'img', {timeout: 10000});
       if (img?.src)
         authorMedia = extract_media ( mainTweet, tweetId );
     }
 
-    debugger;
+    // Article/link preview cards:
+    const authorCards = await extract_card_previews(mainTweet, tweetId);
+    const quotedCards = quotedTweet ? await extract_card_previews(quotedTweet, tweetId+'_q') : [];
 
     chrome.runtime.sendMessage({
       type: 'page-data',
-      authorName: authorInfo.name, authorHandle: authorInfo.handle, authorUrl: authorInfo.profileUrl, authorMedia, quotedName, quotedHandle, quotedUrl, quotedMedia, tweetTime, mainHTML, quoteHTML, repliesHTML: [], tweetUrl
+      authorName: authorInfo.name, authorHandle: authorInfo.handle, authorUrl: authorInfo.profileUrl, authorMedia, authorCards, quotedName, quotedHandle, quotedUrl, quotedMedia, quotedCards, tweetTime, mainHTML, quoteHTML, repliesHTML: [], tweetUrl
     });
   } catch (error) {
     chrome.runtime.sendMessage({ type: 'page-data', error: error.message });
