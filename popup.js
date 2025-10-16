@@ -21,6 +21,8 @@
  *
  * Bugs:
  *
+ * Splitting a thread across multiple scraper runs will break any post quote links that go to before the current run.
+ *
  * Tagged handles in tweets don't link to the account, but to just file://handle
  *
  * Tweet replies can't exactly be embedded directly.

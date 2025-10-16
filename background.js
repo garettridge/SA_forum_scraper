@@ -22,6 +22,7 @@ const postIdToPage = {};
 const scrapeStateKey = 'sa_scraper_state';
 const tweetCache = new Map();
 const downloadedMedia = new Set();
+const logBuffer = [];
 
 //--------------------------------------
 // HELPERS
@@ -61,16 +62,15 @@ function waitWithTimeout(executor, timeout = 10000, onTimeout) {
 
 function waitForPageLoad(tabId, timeout = 30000) {
     return waitWithTimeout((resolve) => {
-        function listener(details) {
+        const listener = function(details) {
             if (details.tabId === tabId && details.frameId === 0) {
                 chrome.webNavigation.onCompleted.removeListener(listener);
                 log(`[waitForPageLoad] Page load completed for tab ${tabId}.`);
                 resolve();
             }
-        }
+        };
         chrome.webNavigation.onCompleted.addListener(listener);
     }, timeout, () => {
-        chrome.webNavigation.onCompleted.removeListener(listener);
         log(`[waitForPageLoad] Timeout waiting for page load on tab ${tabId}`);
     });
 }
@@ -137,6 +137,7 @@ async function downloadBlob(blob, folder, filename) {
 
 function log(msg) {
   console.log(`[SA Scraper] ${msg}`);
+  logBuffer.push(msg);
   chrome.runtime.sendMessage({ type: 'status', text: msg });
 }
 
@@ -153,6 +154,36 @@ function storageLocal(action, keyOrObj) {
       if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
       else resolve(result);
     });
+  });
+}
+
+// Remove/block somethingawful images/media from the original network traffic, since we'll need a separate fetch to scrape each one anyway.
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    // Only block if blocking is enabled and tabId matches
+    if (currentTabId !== null && details.tabId === currentTabId && details.url.includes('forums.somethingawful.com')) {
+      return { cancel: true };
+    }
+    // Otherwise do not block
+  },
+  {
+    // Filter for all URLs, but you can restrict to SA domains or relevant origins
+    urls: ["<all_urls>"],
+    types: ["image", "media", "object", "other"] // block images, videos, and possibly other media types
+  },
+  ["blocking"]
+);
+
+function exportLogs(threadID) {
+  const blob = new Blob([logBuffer.join('\n')], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  chrome.downloads.download({
+    url: url,
+    filename: 'sa_scraper_log_'+threadID+'.txt',
+    conflictAction: 'overwrite',
+    saveAs: false,
+  }, () => {
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
   });
 }
 
@@ -350,12 +381,14 @@ async function fetchAndDownloadImage(img, folder) {
     log(`Saved image: images/${img.filename}`);
   } catch (error) {
     log(`🛑 Error fetching image ${img.url}: ${error.message}`);
+    /*
     isPaused = true;
     chrome.runtime.sendMessage({
       type: 'status',
       text: `🛑 Error fetching image: ${img.url} — ${error.message}. Archiving paused.`
     });
     throw error;
+    */
   }
 }
 
@@ -373,12 +406,14 @@ async function fetchMediaGroupWithFallback(sources, folder) {
   }
   // If none succeeded, pause and throw
   log(`🛑 All media sources failed for ${sources[0].filename}. Pausing scrape.`);
+  /*
   isPaused = true;
   chrome.runtime.sendMessage({
     type: 'status',
     text: `🛑 All media sources failed for ${sources[0].filename}. Archiving paused.`
   });
   throw new Error(`All media sources failed for ${sources[0].filename}`);
+  */
 }
 
 async function fetchImagesWithPoolWithFallback(images, folder, concurrency = 4) {
@@ -931,22 +966,6 @@ document.addEventListener('DOMContentLoaded', function () {
   pageDataResolver = null;
   await storageLocal('remove', [`${scrapeStateKey}_${threadId}`]);
   isRunning = false;
+  exportLogs(threadID);
 }
-
-// Remove/block somethingawful images/media from the original network traffic, since we'll need a separate fetch to scrape each one anyway.
-chrome.webRequest.onBeforeRequest.addListener(
-  (details) => {
-    // Only block if blocking is enabled and tabId matches
-    if (currentTabId !== null && details.tabId === currentTabId && details.url.includes('forums.somethingawful.com')) {
-      return { cancel: true };
-    }
-    // Otherwise do not block
-  },
-  {
-    // Filter for all URLs, but you can restrict to SA domains or relevant origins
-    urls: ["<all_urls>"],
-    types: ["image", "media", "object", "other"] // block images, videos, and possibly other media types
-  },
-  ["blocking"]
-);
 
