@@ -32,32 +32,16 @@ function delayRandom(min, range) {
   return new Promise(res => setTimeout(res, ms));
 }
 
-function waitWithTimeout(executor, timeout = 10000, onTimeout) {
-    return new Promise((resolve, reject) => {
-        let settled = false;
-
-        const timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            if (onTimeout) onTimeout();
-            reject(new Error(`Timeout after ${timeout} ms`));
-        }, timeout);
-
-        executor(
-            (value) => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timer);
-                resolve(value);
-            },
-            (err) => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timer);
-                reject(err);
-            }
-        );
-    });
+function waitWithTimeout(executor, timeout, onTimeout) {
+  return Promise.race([
+    new Promise(executor),
+    new Promise((_, reject) =>
+      setTimeout(() => {
+        if (onTimeout) onTimeout();
+        reject(new Error(`Timeout after ${timeout} ms`));
+      }, timeout)
+    )
+  ]);
 }
 
 function waitForPageLoad(tabId, timeout = 30000) {
@@ -78,7 +62,12 @@ function waitForPageLoad(tabId, timeout = 30000) {
 async function scrapeInTab(pageUrl, selector_to_await, scriptFile) {
     await new Promise(resolve => chrome.tabs.update(currentTabId, { url: pageUrl }, resolve));
     log(`[scrapeThread] Tab updated, waiting for ${pageUrl} page load...`);
-    await waitForPageLoad(currentTabId);
+
+    try {
+      await waitForPageLoad(currentTabId);
+    } catch (e) {
+      log(`[waitForPageLoad] Error: Timeout occurred waiting for something in ${pageUrl}; continuing scrape: ${e.message}`);
+    }
     await new Promise(r => setTimeout(r, 200)); // give JS context time to reset; hoping this helps to not inject script twice.
     log(`[scrapeThread] ${pageUrl} load complete.`);
 
@@ -86,10 +75,7 @@ async function scrapeInTab(pageUrl, selector_to_await, scriptFile) {
           pageDataResolver = resolve;
       }, 20000, () => {
           isPaused = true;
-          chrome.runtime.sendMessage({
-              type: 'status',
-              text: '🛑 Error: Timeout waiting for page data — paused.'
-          });
+          log('🛑 Error: Timeout waiting for page data — paused.');
     });
 
     // Now inject script
