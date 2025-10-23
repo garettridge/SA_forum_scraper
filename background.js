@@ -55,7 +55,7 @@ function waitForPageLoad(tabId, timeout = 30000) {
         };
         chrome.webNavigation.onCompleted.addListener(listener);
     }, timeout, () => {
-        log(`[waitForPageLoad] Timeout waiting for page load on tab ${tabId}`);
+        log(`Warning: [waitForPageLoad] Timeout waiting for page load on tab ${tabId}`);
     });
 }
 
@@ -66,16 +66,16 @@ async function scrapeInTab(pageUrl, selector_to_await, scriptFile) {
     try {
       await waitForPageLoad(currentTabId);
     } catch (e) {
-      log(`[waitForPageLoad] Error: Timeout occurred waiting for something in ${pageUrl}; continuing scrape: ${e.message}`);
+      log(`[waitForPageLoad] Warning: Timeout occurred waiting for something in ${pageUrl}; continuing scrape: ${e.message}`);
     }
     await new Promise(r => setTimeout(r, 200)); // give JS context time to reset; hoping this helps to not inject script twice.
     log(`[scrapeThread] ${pageUrl} load complete.`);
 
     const pageDataPromise = waitWithTimeout((resolve) => {
           pageDataResolver = resolve;
-      }, 20000, () => {
-          isPaused = true;
-          log('🛑 Error: Timeout waiting for page data — paused.');
+      }, 20000, error => {
+          log(`🛑 Error: Timeout waiting for page data from ${pageUrl}; ${error} attempting to continue anyway...`);
+          pageDataResolver = null;
     });
 
     // Now inject script
@@ -83,7 +83,7 @@ async function scrapeInTab(pageUrl, selector_to_await, scriptFile) {
     await new Promise((resolve, reject) => {
       chrome.tabs.executeScript(currentTabId, { file: scriptFile, runAt: 'document_idle' }, res => {
         if (chrome.runtime.lastError) {
-          log(`❌ Failed to inject ${scriptFile}: ${chrome.runtime.lastError.message}`);
+          log(`❌ Error: Failed to inject ${scriptFile}: ${chrome.runtime.lastError.message}`);
           reject(chrome.runtime.lastError);
           return;
         }
@@ -281,7 +281,7 @@ async function getTweetData(tweetUrl) {
     return data;
 
   if( data?.error )
-    log(`Live tweet scraping error: ${data.error}`);
+    log(`Error: Live tweet scraping error: ${data.error}`);
 
   log(`Cache and Live Tweet scrape both failed; falling back to Internet Archive for ${tweetUrl}`);
 
@@ -290,7 +290,7 @@ async function getTweetData(tweetUrl) {
   if (data && !data.error )
     return data;
   if( data?.error )
-    log(`Internet Archive tweet scraping error: ${data.error}`);
+    log(`Error: Internet Archive tweet scraping error: ${data.error}`);
 
   // Return minimal fallback placeholder
   const fallbackData = {
@@ -391,7 +391,7 @@ async function fetchMediaGroupWithFallback(sources, folder) {
     }
   }
   // If none succeeded, pause and throw
-  log(`🛑 All media sources failed for ${sources[0].filename}. Pausing scrape.`);
+  log(`🛑 Error:  All media sources failed for ${sources[0].filename}.`);
   /*
   isPaused = true;
   chrome.runtime.sendMessage({
@@ -502,7 +502,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 //--------------------------------------
 async function scrapeThread() {
   if (isRunning) {
-    log("Scrape already in progress.");
+    log("Error: Scrape already in progress.");
     return;
   }
   isRunning = true;
@@ -511,7 +511,7 @@ async function scrapeThread() {
   const [tab] = await new Promise(r => chrome.tabs.query({ active: true, currentWindow: true }, r));
   log(`Found active tab: id=${tab?.id}, url=${tab?.url}`);
   if (!tab || !tab.url.includes('showthread.php?threadid=')) {
-    log('❌ Not on a Something Awful thread page.');
+    log('Error: ❌ Not on a Something Awful thread page.');
     isRunning = false;
     return;
   }
@@ -555,7 +555,7 @@ async function scrapeThread() {
     log(`[scrapeThread] pageData posts count: ${pageData?.posts?.length ?? 'no posts property'}`);
 
     if (!pageData || !pageData.posts || !pageData.posts.length) {
-      log(`🛑 ERROR: No posts found on page ${pageNum}. Archiving paused.`);
+      log(`🛑 Error: No posts found on page ${pageNum}. Archiving paused.`);
       isPaused = true;
       chrome.runtime.sendMessage({ type: 'status', text: '🛑 Error: No posts found – paused.' });
       break;
@@ -627,7 +627,7 @@ async function scrapeThread() {
       const tweetData = await getTweetData(tweetUrl);
 
       if( tweetData.error ) {
-        log(`Tweet parsing error: ${tweetData.error}`);
+        log(`Error: Tweet parsing error: ${tweetData.error}`);
         isPaused = true;
         isRunning = false;
         return;
