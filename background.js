@@ -12,7 +12,6 @@ const TWEET_CACHE_LIMIT = 30;
 //--------------------------------------
 let isPaused = false;
 let isRunning = false;
-let pageDataResolver = null;
 let currentTabId = null;
 let totalPages = null;
 let finalPage = null;
@@ -45,53 +44,116 @@ function waitWithTimeout(executor, timeout, onTimeout) {
 }
 
 function waitForPageLoad(tabId, timeout = 30000) {
-    return waitWithTimeout((resolve) => {
-        const listener = function(details) {
-            if (details.tabId === tabId && details.frameId === 0) {
-                chrome.webNavigation.onCompleted.removeListener(listener);
-                log(`[waitForPageLoad] Page load completed for tab ${tabId}.`);
-                resolve();
-            }
-        };
-        chrome.webNavigation.onCompleted.addListener(listener);
-    }, timeout, () => {
-        log(`Warning: [waitForPageLoad] Timeout waiting for page load on tab ${tabId}`);
-    });
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      removeListeners();
+      log(`Warning: [waitForPageLoad] Timeout waiting for page load on tab ${tabId}`);
+      resolve();  // You might resolve or reject depending on use case
+    }, timeout);
+
+    function onCompleted(details) {
+      if (details.tabId === tabId && details.frameId === 0) {
+        removeListeners();
+        log(`[waitForPageLoad] Page load completed for tab ${tabId}.`);
+        resolve();
+      }
+    }
+
+    function onCommitted(details) {
+      if (details.tabId === tabId && details.frameId === 0) {
+        log(`[waitForPageLoad] Navigation committed for tab ${tabId}.`);
+        // Optionally resolve earlier here if suitable
+      }
+    }
+
+    function onErrorOccurred(details) {
+      if (details.tabId === tabId && details.frameId === 0) {
+        removeListeners();
+        // Special case for Twitter error code:
+        if (details.error.includes("2152398850") ) {
+          // Non-fatal, resolve but log once or suppress repetitive logs
+          resolve();
+        } else {
+          log(`[waitForPageLoad] Navigation error on tab ${tabId}: ${details.error}`);
+          reject(new Error(`Navigation error: ${details.error}`));
+        }
+      }
+    }
+
+    function removeListeners() {
+      chrome.webNavigation.onCompleted.removeListener(onCompleted);
+      chrome.webNavigation.onCommitted.removeListener(onCommitted);
+      chrome.webNavigation.onErrorOccurred.removeListener(onErrorOccurred);
+      clearTimeout(timeoutId);
+    }
+
+    chrome.webNavigation.onCompleted.addListener(onCompleted);
+    chrome.webNavigation.onCommitted.addListener(onCommitted);
+    chrome.webNavigation.onErrorOccurred.addListener(onErrorOccurred);
+  });
 }
 
-async function scrapeInTab(pageUrl, selector_to_await, scriptFile) {
-    await new Promise(resolve => chrome.tabs.update(currentTabId, { url: pageUrl }, resolve));
-    log(`[scrapeThread] Tab updated, waiting for ${pageUrl} page load...`);
+async function scrapeInTab(pageUrl, scriptFile) {
+  // Navigate to URL in current tab
+  await new Promise(resolve => chrome.tabs.update(currentTabId, { url: pageUrl }, resolve));
+  log(`[scrapeInTab] Navigated to: ${pageUrl}`);
 
-    try {
-      await waitForPageLoad(currentTabId);
-    } catch (e) {
-      log(`[waitForPageLoad] Warning: Timeout occurred waiting for something in ${pageUrl}; continuing scrape: ${e.message}`);
+  // Wait for page load, catch timeout but allow continuation with warning
+  try {
+    await waitForPageLoad(currentTabId, 30000);
+  } catch (e) {
+    log(`[scrapeInTab] Warning: Timeout waiting for page load at ${pageUrl}: ${e.message}`);
+  }
+
+  // Delay to let JS context stabilize
+  await new Promise(r => setTimeout(r, 200));
+
+  // Setup page data promise with scoped listener
+  const pageDataPromise = new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      chrome.runtime.onMessage.removeListener(onMessage);
+      reject(`Timeout waiting for page data from ${pageUrl}`);
+    }, 20000);
+
+    function onMessage(msg, sender) {
+      if (msg.type === 'page-data' && sender.tab?.id === currentTabId) {
+        clearTimeout(timeoutId);
+        chrome.runtime.onMessage.removeListener(onMessage);
+        resolve(msg);
+      }
     }
-    await new Promise(r => setTimeout(r, 200)); // give JS context time to reset; hoping this helps to not inject script twice.
-    log(`[scrapeThread] ${pageUrl} load complete.`);
+    chrome.runtime.onMessage.addListener(onMessage);
+  });
 
-    const pageDataPromise = waitWithTimeout((resolve) => {
-          pageDataResolver = resolve;
-      }, 20000, error => {
-          log(`🛑 Error: Timeout waiting for page data from ${pageUrl}; ${error} attempting to continue anyway...`);
-          pageDataResolver = null;
-    });
-
-    // Now inject script
-    log(`Will attempt to inject script into ${pageUrl}...`);
-    await new Promise((resolve, reject) => {
-      chrome.tabs.executeScript(currentTabId, { file: scriptFile, runAt: 'document_idle' }, res => {
-        if (chrome.runtime.lastError) {
-          log(`❌ Error: Failed to inject ${scriptFile}: ${chrome.runtime.lastError.message}`);
-          reject(chrome.runtime.lastError);
-          return;
-        }
-        log(`📥 ${scriptFile} injected`);
+  // Inject script and handle injection error early
+  await new Promise((resolve, reject) => {
+    chrome.tabs.executeScript(currentTabId, { file: scriptFile, runAt: 'document_idle' }, res => {
+      if (chrome.runtime.lastError) {
+        log(`[scrapeInTab] ❌ Injection error for ${scriptFile}: ${chrome.runtime.lastError.message}`);
+        reject(new Error(chrome.runtime.lastError.message));
+      } else {
+        log(`[scrapeInTab] 📥 ${scriptFile} injected`);
         resolve(res);
-      });
+      }
     });
-  return await pageDataPromise;
+  });
+
+  // Await page data, propagate errors
+  const pageData = await pageDataPromise;
+
+  // If page data posts missing or empty, log and throw to abort scrape
+
+  if (scriptFile === 'scraper.js') {
+    if (!pageData || !Array.isArray(pageData.posts) || pageData.posts.length === 0) {
+      throw new Error(`No posts found on SA page after scrapeInTab for ${pageUrl}`);
+    }
+  } else if (scriptFile === 'tweet-scraper.js') {
+    if (!pageData || !pageData.mainHTML || pageData.mainHTML.trim() === '') {
+      throw new Error(`No tweet content found after scrapeInTab for ${pageUrl}`);
+    }
+  }
+
+  return pageData;
 }
 
 function fetchWithTimeout(url, options = {}, timeout = 5000) {
@@ -160,12 +222,13 @@ chrome.webRequest.onBeforeRequest.addListener(
   ["blocking"]
 );
 
-function exportLogs(threadID) {
+
+function exportLogs(threadId) {
   const blob = new Blob([logBuffer.join('\n')], { type: 'text/plain' });
   const url = URL.createObjectURL(blob);
   chrome.downloads.download({
     url: url,
-    filename: 'sa_scraper_log_'+threadID+'.txt',
+    filename: 'sa_scraper_log_'+threadId+'.txt',
     conflictAction: 'overwrite',
     saveAs: false,
   }, () => {
@@ -262,7 +325,7 @@ async function tryFetchAndCache(fetchFn, tweetUrl) {
       return data;
     }
   } catch (err) {
-    console.warn(`Failed ${fetchFn.name} for ${tweetUrl}: ${err.message}`);
+    log(`Warning: Failed fetch for ${tweetUrl}: ${err.message}`);
   }
   return null;
 }
@@ -276,7 +339,13 @@ async function getTweetData(tweetUrl) {
   log(`Cache miss for: ${tweetUrl}`);
 
   // Try live scrape in controlled tab first
-  let data = await tryFetchAndCache( url => scrapeInTab(url,'div[data-testid="tweetText"]', 'tweet-scraper.js'), tweetUrl);
+  let data;
+  try {
+    data = await tryFetchAndCache( url => scrapeInTab(url, 'tweet-scraper.js'), tweetUrl);
+  }
+  catch (err) {
+    log(`[Warning] Live twitter scrape error: ${err}`);
+  }
   if (data && !data.error )
     return data;
 
@@ -292,9 +361,11 @@ async function getTweetData(tweetUrl) {
   if( data?.error )
     log(`Error: Internet Archive tweet scraping error: ${data.error}`);
 
+  log(`Error: Internet Archive didn't have the tweet.  Will render nothing there and cache that.`);
   // Return minimal fallback placeholder
   const fallbackData = {
-    author: '',
+    authorName: 'Tweet missing from Twitter and Internet Archive.',
+    authorHandle: '',
     tweetTime: '',
     mainHTML: `<a href="${tweetUrl}" target="_blank">${tweetUrl}</a>`,
     replies: []
@@ -369,6 +440,7 @@ async function fetchAndDownloadImage(img, folder) {
     log(`🛑 Error fetching image ${img.url}: ${error.message}`);
     /*
     isPaused = true;
+    exportLogs(folder);
     chrome.runtime.sendMessage({
       type: 'status',
       text: `🛑 Error fetching image: ${img.url} — ${error.message}. Archiving paused.`
@@ -394,6 +466,7 @@ async function fetchMediaGroupWithFallback(sources, folder) {
   log(`🛑 Error:  All media sources failed for ${sources[0].filename}.`);
   /*
   isPaused = true;
+  exportLogs(folder);
   chrome.runtime.sendMessage({
     type: 'status',
     text: `🛑 All media sources failed for ${sources[0].filename}. Archiving paused.`
@@ -440,14 +513,6 @@ async function fetchImagesWithPoolWithFallback(images, folder, concurrency = 4) 
 // MESSAGE HANDLER
 //--------------------------------------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'page-data' && pageDataResolver) {
-    log(`[onMessage] Resolving pageDataResolver with page-data (${msg ? 'OK' : 'null'})`);
-    if (msg.lastPageNumber && !isNaN(msg.lastPageNumber)) {
-      totalPages = msg.lastPageNumber;
-    }
-    pageDataResolver(msg);
-    pageDataResolver = null;
-  }
   if (msg.command === 'start-scrape') {
     if (!isNaN(msg?.startPage))
       startPage = msg.startPage;
@@ -459,6 +524,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'scraping-error') {
     isPaused = true;
+    exportLogs();
     log(`🛑 Error reported from content script: ${msg.message} — paused.`);
     chrome.runtime.sendMessage({ type: 'status', text: '🛑 Error: ' + msg.message + ' (paused)' });
   }
@@ -529,14 +595,13 @@ async function scrapeThread() {
   log(`Loaded resume page: ${JSON.stringify(resumePage)}`);
 
   let pageNum = startPage;
-  if (resumePage > 0 && resumePage < totalPages) {
+  if (resumePage > 0 && resumePage < finalPage) {
     pageNum = resumePage;
-    finalPage = Math.min( pageNum + maxPages - 1, totalPages);
     log(`🔄 Resuming thread ${threadId} from page ${pageNum}, will scrape ${maxPages} more pages, stopping at ${finalPage}`);
   } else {
-    finalPage = pageNum + maxPages - 1;
     log(`Starting fresh scrape, will scrape ${maxPages} pages total.`);
   }
+  finalPage = pageNum + maxPages - 1;
 
   chrome.runtime.sendMessage({
     type: 'progressUpdate',
@@ -551,14 +616,24 @@ async function scrapeThread() {
     const pageUrl = baseUrl + pageNum;
     log(`➡️ Navigating to page ${pageNum}: ${pageUrl}`);
 
-    const pageData = await scrapeInTab(pageUrl, 'table.post',  'scraper.js');
+    let pageData;
+    try {
+      pageData = await scrapeInTab(pageUrl, 'scraper.js');
+    } catch (err) {
+      log("Thread page load failed: "+err.message);
+      isPaused = true;
+      exportLogs(threadId);
+      chrome.runtime.sendMessage({ type: 'status', text: err.message + ' (paused)' });
+      return;
+    }
     log(`[scrapeThread] pageData posts count: ${pageData?.posts?.length ?? 'no posts property'}`);
 
     if (!pageData || !pageData.posts || !pageData.posts.length) {
       log(`🛑 Error: No posts found on page ${pageNum}. Archiving paused.`);
       isPaused = true;
+      exportLogs(threadId);
       chrome.runtime.sendMessage({ type: 'status', text: '🛑 Error: No posts found – paused.' });
-      break;
+      return;
     }
     if (isPaused) {
       log("⏸ Scraping paused, restarting this loop iteration.");
@@ -629,6 +704,7 @@ async function scrapeThread() {
       if( tweetData.error ) {
         log(`Error: Tweet parsing error: ${tweetData.error}`);
         isPaused = true;
+        exportLogs(threadId);
         isRunning = false;
         return;
       }
@@ -663,7 +739,7 @@ async function scrapeThread() {
     }
 
     const prevPage = pageNum > 1 ? `page${String(pageNum - 1).padStart(4, '0')}.html` : null;
-    const nextPage = pageNum < totalPages ? `page${String(pageNum + 1).padStart(4, '0')}.html` : null;
+    const nextPage = pageNum < pageData.lastPageNumber ? `page${String(pageNum + 1).padStart(4, '0')}.html` : null;
 
     const pageNavHTML = `
     <div style="text-align:center; margin:30px 0; font-size:18px;">
@@ -945,13 +1021,14 @@ document.addEventListener('DOMContentLoaded', function () {
       log(`[scrapeThread] Waiting before next page...`);
       await delayRandom(page_delay_min, page_delay_range);
     }
+    if ( pageNum >= pageData.lastPageNumber )
+      break;
   }
 
   log('🎉 Finished scraping thread.');
   currentTabId = null;
-  pageDataResolver = null;
   await storageLocal('remove', [`${scrapeStateKey}_${threadId}`]);
   isRunning = false;
-  exportLogs(threadID);
+  exportLogs(threadId);
 }
 

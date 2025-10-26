@@ -11,6 +11,8 @@
     "webNavigation",
     "webRequest",
     "webRequestBlocking",
+    "*://*.somethingawful.com/*",
+    "*://*.twitter.com/*",
     "<all_urls>"
   ],
   "browser_action": {
@@ -22,7 +24,10 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://forums.somethingawful.com/*"],
+      "matches": [
+        "*://forums.somethingawful.com/*",
+        "*://*.twitter.com/*"
+      ],
       "js": ["content.js"]
     }
   ],
