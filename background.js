@@ -126,20 +126,30 @@ async function scrapeInTab(pageUrl, scriptFile) {
   });
 
   // Inject script and handle injection error early
-  await new Promise((resolve, reject) => {
-    chrome.tabs.executeScript(currentTabId, { file: scriptFile, runAt: 'document_idle' }, res => {
-      if (chrome.runtime.lastError) {
-        log(`[scrapeInTab] ❌ Injection error for ${scriptFile}: ${chrome.runtime.lastError.message}`);
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        log(`[scrapeInTab] 📥 ${scriptFile} injected`);
-        resolve(res);
-      }
+  try {
+    await new Promise((resolve, reject) => {
+      chrome.tabs.executeScript( currentTabId, { file: scriptFile, runAt: 'document_idle' }, res => {
+          if (chrome.runtime.lastError) {
+            log(`[scrapeInTab] ❌ Injection error for ${scriptFile}: ${chrome.runtime.lastError?.message}`);
+            reject(new Error(chrome.runtime.lastError?.message));
+          } else {
+            log(`[scrapeInTab] 📥 ${scriptFile} injected`);
+            resolve(res);
+          }
+        }
+      );
     });
-  });
+  } catch (err) {
+    log("[scrapeInTab] Script injection threw: " + err.message);
+  }
 
   // Await page data, propagate errors
-  const pageData = await pageDataPromise;
+  let pageData;
+  try {
+    pageData = await pageDataPromise;
+  } catch (err) {
+    log("[scrapeInTab] page data error: " + err.message);
+  }
 
   // If page data posts missing or empty, log and throw to abort scrape
 
@@ -459,7 +469,7 @@ async function fetchMediaGroupWithFallback(sources, folder) {
       return;
     } catch (err) {
       // Log error but continue trying others
-      log(`⚠️ Attempt failed for ${src.url}: ${err.message}`);
+      log(`⚠️ Attempt failed for media ${src.url}: ${err.message}`);
     }
   }
   // If none succeeded, pause and throw
@@ -499,7 +509,11 @@ async function fetchImagesWithPoolWithFallback(images, folder, concurrency = 4) 
         log(`Skipping duplicate media: ${currentGroupKey}`);
         continue;
       }
-      await fetchMediaGroupWithFallback(groups[currentGroupKey], folder);
+      try {
+        await fetchMediaGroupWithFallback(groups[currentGroupKey], folder);
+      } catch (err) {
+        log(`Image group ${currentGroupKey} failed: ${err.message}`);
+      }
       downloadedMedia.add(currentGroupKey);
       await delayRandom(image_delay_min, image_delay_range);
     }
@@ -620,20 +634,20 @@ async function scrapeThread() {
     try {
       pageData = await scrapeInTab(pageUrl, 'scraper.js');
     } catch (err) {
-      log("Thread page load failed: "+err.message);
-      isPaused = true;
+      log("Major Error: Thread page load failed: "+err.message);
+      /* isPaused = true;
       exportLogs(threadId);
       chrome.runtime.sendMessage({ type: 'status', text: err.message + ' (paused)' });
-      return;
+      return; */
     }
     log(`[scrapeThread] pageData posts count: ${pageData?.posts?.length ?? 'no posts property'}`);
 
     if (!pageData || !pageData.posts || !pageData.posts.length) {
-      log(`🛑 Error: No posts found on page ${pageNum}. Archiving paused.`);
-      isPaused = true;
+      log(`🛑 Major Error: No posts found on page ${pageNum}.`);
+      /* isPaused = true;
       exportLogs(threadId);
       chrome.runtime.sendMessage({ type: 'status', text: '🛑 Error: No posts found – paused.' });
-      return;
+      return; */
     }
     if (isPaused) {
       log("⏸ Scraping paused, restarting this loop iteration.");
@@ -699,14 +713,19 @@ async function scrapeThread() {
           continue;
       }
 
-      const tweetData = await getTweetData(tweetUrl);
+      let tweetData;
+      try {
+        tweetData = await getTweetData(tweetUrl);
+      } catch (err) {
+        log(`Error: Tweet retrieval failure: ${err.message}`);
+      }
 
       if( tweetData.error ) {
         log(`Error: Tweet parsing error: ${tweetData.error}`);
-        isPaused = true;
+        /* isPaused = true;
         exportLogs(threadId);
         isRunning = false;
-        return;
+        return; */
       }
 
       if( ! tweetData.wasCached ) {
@@ -965,6 +984,14 @@ async function scrapeThread() {
       border-radius: 10px;
       box-shadow: 0 2px 8px rgba(0,0,0,0.3);
       display: block;
+    }
+    .local-tweet img[alt][src*="twimg.com/emoji"] {
+      height: 1em !important;
+      width: auto !important;
+      vertical-align: -0.1em !important;
+      display: inline !important;
+      margin: 0 !important;
+      padding: 0 !important;
     }
   </style>
 </head>
