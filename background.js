@@ -26,6 +26,11 @@ const logBuffer = [];
 //--------------------------------------
 // HELPERS
 //--------------------------------------
+window.addEventListener('unhandledrejection', event => {
+  log("Error: Unhandled rejection: " + event.reason);
+  event.preventDefault(); // avoid crashing or noisy console
+});
+
 function delayRandom(min, range) {
   const ms = min + Math.floor(Math.random() * range);
   return new Promise(res => setTimeout(res, ms));
@@ -93,77 +98,93 @@ function waitForPageLoad(tabId, timeout = 30000) {
   });
 }
 
-async function scrapeInTab(pageUrl, scriptFile) {
-  // Navigate to URL in current tab
-  await new Promise(resolve => chrome.tabs.update(currentTabId, { url: pageUrl }, resolve));
-  log(`[scrapeInTab] Navigated to: ${pageUrl}`);
+async function scrapeInTab(pageUrl, scriptFile, maxRetries = 5) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      // Navigate to URL in current tab
+      await new Promise(resolve => chrome.tabs.update(currentTabId, { url: pageUrl }, resolve));
+      log(`[scrapeInTab] Navigated to: ${pageUrl} (attempt ${attempt})`);
 
-  // Wait for page load, catch timeout but allow continuation with warning
-  try {
-    await waitForPageLoad(currentTabId, 30000);
-  } catch (e) {
-    log(`[scrapeInTab] Warning: Timeout waiting for page load at ${pageUrl}: ${e.message}`);
-  }
-
-  // Delay to let JS context stabilize
-  await new Promise(r => setTimeout(r, 200));
-
-  // Setup page data promise with scoped listener
-  const pageDataPromise = new Promise((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
-      chrome.runtime.onMessage.removeListener(onMessage);
-      reject(`Timeout waiting for page data from ${pageUrl}`);
-    }, 20000);
-
-    function onMessage(msg, sender) {
-      if (msg.type === 'page-data' && sender.tab?.id === currentTabId) {
-        clearTimeout(timeoutId);
-        chrome.runtime.onMessage.removeListener(onMessage);
-        resolve(msg);
+      // Wait for page load, catch timeout but allow continuation with warning
+      try {
+        await waitForPageLoad(currentTabId, 30000);
+      } catch (e) {
+        log(`[scrapeInTab] Warning: Timeout waiting for page load at ${pageUrl}: ${e.message}`);
       }
-    }
-    chrome.runtime.onMessage.addListener(onMessage);
-  });
 
-  // Inject script and handle injection error early
-  try {
-    await new Promise((resolve, reject) => {
-      chrome.tabs.executeScript( currentTabId, { file: scriptFile, runAt: 'document_idle' }, res => {
-          if (chrome.runtime.lastError) {
-            log(`[scrapeInTab] ❌ Injection error for ${scriptFile}: ${chrome.runtime.lastError?.message}`);
-            reject(new Error(chrome.runtime.lastError?.message));
-          } else {
-            log(`[scrapeInTab] 📥 ${scriptFile} injected`);
-            resolve(res);
+      // Delay to let JS context stabilize
+      await new Promise(r => setTimeout(r, 200));
+
+      // Setup page data promise with scoped listener
+      const pageDataPromise = new Promise((resolve) => {
+        const timeoutId = setTimeout(() => {
+          chrome.runtime.onMessage.removeListener(onMessage);
+          log(`Timeout waiting for page data from ${pageUrl}`);
+          console.trace();
+          resolve(null);  // resolve with null instead of reject
+        }, 20000);
+
+        function onMessage(msg, sender) {
+          if (msg.type === 'page-data' && sender.tab?.id === currentTabId) {
+            clearTimeout(timeoutId);
+            chrome.runtime.onMessage.removeListener(onMessage);
+            resolve(msg);
           }
         }
-      );
-    });
-  } catch (err) {
-    log("[scrapeInTab] Script injection threw: " + err.message);
-  }
+        chrome.runtime.onMessage.addListener(onMessage);
+      });
 
-  // Await page data, propagate errors
-  let pageData;
-  try {
-    pageData = await pageDataPromise;
-  } catch (err) {
-    log("[scrapeInTab] page data error: " + err.message);
-  }
+      log(`[scrapeInTab] Attempting contentScript Injection.`);
+      try {
+        const result = await waitWithTimeout(
+          (resolve, reject) => chrome.tabs.executeScript(currentTabId, { file: scriptFile, runAt: 'document_idle' }, res => {
+            if (chrome.runtime.lastError) {
+              log(`[scrapeInTab] ❌ Injection error: ${chrome.runtime.lastError.message}`);
+              resolve(null);
+            } else {
+              log(`[scrapeInTab] 📥 ${scriptFile} injected`);
+              resolve(res);
+            }
+          }),
+          10000, // 10 second timeout
+          () => log(`[scrapeInTab] Injection timed out for ${scriptFile}`)
+        );
+        if (!result) throw new Error("Script injection timed out or failed.");
+      } catch (err) {
+        log("[scrapeInTab] Script injection threw: " + err.message);
+        // retry injection or proceed to next attempt
+        throw err; // to retry with catch below
+      }
 
-  // If page data posts missing or empty, log and throw to abort scrape
+      // Await page data, propagate errors
+      pageData = await pageDataPromise;
 
-  if (scriptFile === 'scraper.js') {
-    if (!pageData || !Array.isArray(pageData.posts) || pageData.posts.length === 0) {
-      throw new Error(`No posts found on SA page after scrapeInTab for ${pageUrl}`);
+      // Validate pageData
+      if (scriptFile === 'scraper.js') {
+        if (!pageData || !Array.isArray(pageData.posts) || pageData.posts.length === 0) {
+          throw new Error(`No posts found on SA page after scrapeInTab for ${pageUrl}`);
+        }
+      } else if (scriptFile === 'tweet-scraper.js') {
+        log("Validating tweet.");
+        if (!pageData || !pageData.mainHTML || pageData.mainHTML.trim() === '') {
+          log("Tweet Invalid.");
+          attempt = maxRetries;
+          throw new Error(`No tweet content found after scrapeInTab for ${pageUrl}`);
+        }
+      }
+
+      return pageData; // Success: return on first successful scrape
+    } catch (err) {
+      log(`[scrapeInTab] Attempt ${attempt} failed: ${err.message}`);
+      if (attempt === maxRetries) {
+        // On last attempt, rethrow error to abort or be handled upstream
+        throw err;
+      }
+      // Wait before retrying
+      await new Promise(r => setTimeout(r, 2000));
+      log(`[scrapeInTab] Retrying attempt ${attempt + 1} for ${pageUrl}`);
     }
-  } else if (scriptFile === 'tweet-scraper.js') {
-    if (!pageData || !pageData.mainHTML || pageData.mainHTML.trim() === '') {
-      throw new Error(`No tweet content found after scrapeInTab for ${pageUrl}`);
-    }
   }
-
-  return pageData;
 }
 
 function fetchWithTimeout(url, options = {}, timeout = 5000) {

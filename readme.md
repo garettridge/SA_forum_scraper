@@ -1,10 +1,13 @@
 Known Bugs:
 
+You have to babysit it while it's running a bit, because sometimes it will stop (at the point of a Tweet "timing out") and needs to get manually unstuck by hitting the back button on the tab getting scraped.  Then it continues fine.
+
+Missing tweet images:
+    Videos in embedded tweets might not show their preview images at all.
+
+    Intermittent: Rarely, tweet images or preview cards don't load, possibly due to timing issues while checking for them.
+
 Processing a thread in pieces (across multiple scraper runs) will break any post quote links that go to before the current run.
-
-Videos in embedded tweets might not show their preview images at all.
-
-Intermittent: Rarely, tweet images or preview cards don't load, possibly due to timing issues while checking for them.
 
 Intermittent: Pause/resume weirdness; not tested much.
 
@@ -13,17 +16,15 @@ Intermittent: The SA timg scraper sometimes replaces blocks like these with just
 
 Limitations:
 
-Minor formatting differences from SA.
+Minor formatting differences from SA.  Also no attempt to archive SA's niche features besides the posts themselves (user avatars, filter by user, etc).
 
 Tweet embeds that have since been deleted from Twitter will check Internet Archive next, but most tweets aren't on there, so those will show as missing.
 
-Tweets that are no longer anywhere but Internet Archive will not show their images/media.  Can't scrape/archive what no longer exists.   The urls just go back to the twitter CDN where they are no longer present.
+Tweets that are no longer anywhere but Internet Archive will show their text but not their images/media.  The urls just go back to the twitter CDN where they are no longer present, and you can't scrape/archive what no longer exists.   
 
-If any SA post included a tweet reply, that will not show the parent for context.  Tweet embeds now hide their parent tweets when not logged in, so the scraper can't see it.  Tweets scraped from Internet Archive get around this by scraping the parent tweet and its top replies.
+If any SA post included a tweet reply, that will not show the parent for context.  Tweet embeds now hide their parent tweets when not logged in, so the scraper can't see it.  Tweets scraped from Internet Archive get around this by scraping the parent tweet instead and its top replies, which might not even include the posted one.
 
-No attempt to sanitize HTML from SA posts.
-
-No attempt to archive SA's niche features besides the posts themselves (user avatars, filter by user, etc).
+No attempt to sanitize HTML from SA posts. That would be unexpected anyway, but if the page becomes editable (new posts added) it should be addressed.
 
 TODO:
 
