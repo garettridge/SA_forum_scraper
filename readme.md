@@ -1,3 +1,7 @@
+This is an archiving tool for megathreads.  Megathreads are very long-running discussions on the internet, notable for their continuity as they explore a single topic. A micro-culture evolves over their course. Participants come and go, yet all can assume a baseline shared background because of articles/sources/events from earlier in the conversation, allowing deeper investigations.
+
+Github project:
+
 Known Bugs:
 
 You have to babysit it while it's running a bit, because sometimes it will stop (at the point of a Tweet "timing out") and needs to get manually unstuck by hitting the back button on the tab getting scraped.  Then it continues fine.

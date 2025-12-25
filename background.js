@@ -98,7 +98,8 @@ function waitForPageLoad(tabId, timeout = 30000) {
   });
 }
 
-async function scrapeInTab(pageUrl, scriptFile, maxRetries = 5) {
+async function scrapeInTab(pageUrl, scriptFile, maxRetries = 4) {
+  if (scriptFile === 'tweet-scraper.js') maxRetries = 2;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       // Navigate to URL in current tab
@@ -120,7 +121,6 @@ async function scrapeInTab(pageUrl, scriptFile, maxRetries = 5) {
         const timeoutId = setTimeout(() => {
           chrome.runtime.onMessage.removeListener(onMessage);
           log(`Timeout waiting for page data from ${pageUrl}`);
-          console.trace();
           resolve(null);  // resolve with null instead of reject
         }, 20000);
 
